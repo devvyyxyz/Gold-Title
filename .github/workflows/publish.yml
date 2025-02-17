@@ -1,0 +1,116 @@
+name: Publish Texture Pack to Modrinth
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    name: Validate, Package, and Publish Texture Pack
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate JSON Files
+        run: |
+          for file in $(find . -name "*.json"); do
+            if ! jq empty "$file"; then
+              echo "Invalid JSON: $file"
+              exit 1
+            fi
+          done
+
+      - name: Validate pack.mcmeta
+        run: |
+          if [ ! -f "pack.mcmeta" ]; then
+            echo "Error: pack.mcmeta is missing!"
+            exit 1
+          fi
+          if ! jq -e '.pack.pack_format' pack.mcmeta > /dev/null; then
+            echo "Error: pack_format is missing in pack.mcmeta!"
+            exit 1
+          fi
+
+      - name: Detect pack_format and set game versions
+        id: detect_pack_format
+        run: |
+          PACK_FORMAT=$(jq -r '.pack.pack_format' pack.mcmeta)
+          echo "Detected pack_format: $PACK_FORMAT"
+
+          case $PACK_FORMAT in
+            1) GAME_VERSIONS="1.6,1.7" ;;
+            2) GAME_VERSIONS="1.8" ;;
+            3) GAME_VERSIONS="1.9,1.10,1.11" ;;
+            4) GAME_VERSIONS="1.12" ;;
+            5) GAME_VERSIONS="1.13" ;;
+            6) GAME_VERSIONS="1.14" ;;
+            7) GAME_VERSIONS="1.15" ;;
+            8) GAME_VERSIONS="1.16" ;;
+            9|10|11) GAME_VERSIONS="1.17,1.18" ;;
+            12|13) GAME_VERSIONS="1.19" ;;
+            14|15) GAME_VERSIONS="1.20" ;;
+            *) echo "Unknown pack_format!"; exit 1 ;;
+          esac
+
+          echo "Mapped to Minecraft versions: $GAME_VERSIONS"
+          echo "game_versions=$GAME_VERSIONS" >> $GITHUB_ENV
+
+      - name: Package Texture Pack
+        run: zip -r "texturepack-${{ github.event.release.tag_name }}.zip" . -x ".git/*"
+
+      - name: Set ZIP Filename
+        run: echo "ZIP_NAME=texturepack-${{ github.event.release.tag_name }}.zip" >> $GITHUB_ENV
+
+      - name: Publish to Modrinth
+        uses: Kir-Antipov/mc-publish@v3.3
+        with:
+          modrinth-id: rERW3QhL
+          modrinth-token: ${{ secrets.MODRINTH_TOKEN }}
+          github-tag: ${{ github.event.release.tag_name }}
+          name: ${{ github.event.release.name }}
+          version: ${{ github.event.release.tag_name }}
+          changelog: ${{ github.event.release.body }}
+          type: resourcepack
+          loaders: minecraft
+          game-versions: ${{ env.game_versions }}
+          files: ${{ env.ZIP_NAME }}
+
+      - name: Upload to GitHub Releases
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ${{ env.ZIP_NAME }}
+
+      - name: Send Discord Notification
+        run: |
+          curl -H "Content-Type: application/json" -X POST -d '{
+            "username": "Modrinth Bot",
+            "avatar_url": "https://cdn.modrinth.com/modrinth-new.png",
+            "embeds": [{
+              "title": "New Release: ${{ github.event.release.name }}",
+              "url": "https://modrinth.com/resourcepack/rERW3QhL",
+              "description": "**${{ github.event.release.name }}** is now available! 🎉\n\n${{ github.event.release.body }}",
+              "color": 65280,
+              "thumbnail": {
+                "url": "https://cdn.modrinth.com/data/rERW3QhL/icon.png"
+              },
+              "fields": [
+                {
+                  "name": "🔹 Download",
+                  "value": "[Click here](https://modrinth.com/resourcepack/rERW3QhL/version/${{ github.event.release.tag_name }})"
+                },
+                {
+                  "name": "📌 Pack Format",
+                  "value": "${{ env.game_versions }}"
+                },
+                {
+                  "name": "📅 Released",
+                  "value": "${{ github.event.release.published_at }}"
+                }
+              ],
+              "footer": {
+                "text": "Published via GitHub Actions"
+              },
+              "timestamp": "${{ github.event.release.published_at }}"
+            }]
+          }' ${{ secrets.DISCORD_WEBHOOK }}
